@@ -1,4 +1,8 @@
-import os
+import urllib
+import urllib2
+import mimetools, mimetypes
+import os, stat
+import sys
 import unittest
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
@@ -110,6 +114,7 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
 
     # Add vertical spacer
     self.layout.addStretch(1)
+    self.j = {}
 
   def cleanup(self):
     pass
@@ -193,14 +198,24 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
     self.setupGroupBoxLayout.addWidget(self.dataDirButton)
     
   def setupimageSelectionUI(self):
-    self.loadDataButton = qt.QPushButton("Load Data")
+    self.loadDataButton = qt.QPushButton("Load Image from disk")
     self.imageSelectionGroupBoxLayout.addWidget(self.loadDataButton)
     self.loadDataButton.connect('clicked()', self.loadTCGAData)
-    #print "Adding WIP Button!"
-    #self.WIP = qt.QPushButton("WIP")
+    #self.WIP = qt.QPushButton("Load Image from Web")
     #self.WIP.connect('clicked()', self.onWIPButtonClicked)
     #self.imageSelectionGroupBoxLayout.addWidget(self.WIP)
+    self.WIP2 = qt.QPushButton("Select image from web")
+    self.WIP2.connect('clicked()', self.onWIP2ButtonClicked)
+    self.imageSelectionGroupBoxLayout.addWidget(self.WIP2)
+    self.WIP3 = qt.QPushButton("Load image from web")
+    self.WIP3.connect('clicked()', self.onWIP3ButtonClicked)
+    self.imageSelectionGroupBoxLayout.addWidget(self.WIP3)
 
+  def onWIP2ButtonClicked(self):
+    self.openTargetImage0()
+
+  def onWIP3ButtonClicked(self):
+    self.openTargetImage()
 
   def setupsegmentationUI(self):
     print ""
@@ -214,17 +229,37 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
     #self.submissionGroupBoxLayout.addWidget(self.WebSaveButton)
     #self.WebSaveButton.connect('clicked()', self.onWebSaveButtonClicked)
 
+  def QImage2vtkImage(self, image):
+    i = vtk.vtkImageData().NewInstance()
+    i.SetDimensions(image.width(),image.height(),1)
+    i.AllocateScalars(vtk.VTK_UNSIGNED_CHAR,3)
+    for x in range(0,image.width()):
+      for y in range(0,image.height()):
+          c = qt.QColor(image.pixel(x,y))
+          i.SetScalarComponentFromDouble(x,y,0,0,c.red())
+          i.SetScalarComponentFromDouble(x,y,0,1,c.green())
+          i.SetScalarComponentFromDouble(x,y,0,2,c.blue())
+    return i
+
   def onWIPButtonClicked(self):
-    from EditorLib import EditUtil
-    self.editUtil = EditorLib.EditUtil.EditUtil()
-    self.labelNode = self.editUtil.getLabelVolume()
-    print self.labelNode.GetImageData()
-    self.labelNode.GetImageData().Modified() 
-    self.labelNode.Modified() 
-    self.currentMessage = "WIP Code is done being executed..." 
-    slicer.util.showStatusMessage(self.currentMessage) 
-    
+    import urllib2
+    reply = urllib2.urlopen('http://www.osa.sunysb.edu/erich.png')
+    byte_array = reply.read()
+    image = qt.QImage(qt.QImage.Format_RGB888)
+    image.loadFromData(byte_array) 
+    imageData = self.QImage2vtkImage(image)
+    volumeNode = slicer.vtkMRMLVectorVolumeNode()
+    volumeNode.SetName("WEB")
+    volumeNode.SetAndObserveImageData(imageData)
+    displayNode = slicer.vtkMRMLVectorVolumeDisplayNode()
+    slicer.mrmlScene.AddNode(volumeNode)
+    slicer.mrmlScene.AddNode(displayNode)
+    volumeNode.SetAndObserveDisplayNodeID(displayNode.GetID())
+    displayNode.SetAndObserveColorNodeID('vtkMRMLColorTableNodeGrey')
+    self.mutate() 
+
   def onSaveButtonClicked(self):
+    import zipfile
     bundle = EditUtil.EditUtil().getParameterNode().GetParameter('QuickTCGAEffect,erich')
     tran = json.loads(bundle)
     layers = []
@@ -232,14 +267,17 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
       nn = tran[key]
       nn["file"] = key + '.tif'
       layers.append(tran[key])
-    j = {}
-    j['layers'] = layers
-    j['username'] = self.setupUserName.text
-    j['sourcetile'] = self.tilename
-    j['generator'] = slicer.app.applicationVersion
-    j['timestamp'] = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    self.j['layers'] = layers
+    self.j['username'] = self.setupUserName.text
+    self.j['sourcetile'] = self.tilename
+    self.j['generator'] = slicer.app.applicationVersion
+    self.j['timestamp'] = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     labelNodes = slicer.util.getNodes('vtkMRMLLabelMapVolumeNode*')
     savedMessage = 'Segmentations for the following series were saved:\n\n'
+    zfname = os.path.join(self.dataDirButton.directory, self.tilename + '.zip')
+    print "zipfile name"
+    print zfname
+    zf = zipfile.ZipFile(zfname, mode='w')
     for label in labelNodes.values():
       labelName = label.GetName()
       labelFileName = os.path.join(self.dataDirButton.directory, labelName + '.tif')
@@ -250,13 +288,28 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
       sNode.SetURI(None)
       success = sNode.WriteData(label)
       if success:
-        print "successful writing "+labelFileName
+        print "adding "+labelFileName+" to zipfile"
+        zf.write(labelFileName)
+        os.remove(labelFileName)
       else:
         print "failed writing "+labelFileName
-    jstr = json.dumps(j,sort_keys=True, indent=4, separators=(',', ': '))
-    f = open(os.path.join(self.dataDirButton.directory, self.tilename + '.json'),'w')
+    jstr = json.dumps(self.j,sort_keys=True, indent=4, separators=(',', ': '))
+    mfname = os.path.join(self.dataDirButton.directory, 'manifest.json')
+    f = open(mfname,'w')
     f.write(jstr)
     f.close()
+    zf.write(mfname)
+    zf.close()
+    os.remove(mfname)
+    #import sys
+    #reload(sys)
+    #sys.setdefaultencoding('utf8')
+    #opener = urllib2.build_opener(MultipartPostHandler)
+    #params = { "ss" : "0",            # show source
+    #           "doctype" : "Inline",
+    #           "uploaded_file" : open(zfname, "rb") }
+    #print params
+    #print opener.open('http://quip1.bmi.stonybrook.edu:4000/upload', params).read()
 
   def onWebSaveButtonClicked(self):
     print "Web Save to be implemented...."
@@ -304,6 +357,115 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
     self.editorWidget.setup()
     self.segmentationGroupBoxLayout.addWidget(self.editorWidget.parent)
 
+  def mutate(self):
+    red_logic = slicer.app.layoutManager().sliceWidget("Red").sliceLogic()
+    red_cn = red_logic.GetSliceCompositeNode()
+    fgrdVolID = red_cn.GetBackgroundVolumeID()
+    fgrdNode = slicer.util.getNode("WEB")
+    fgrdVolID = fgrdNode.GetID()
+    fMat=vtk.vtkMatrix4x4()
+    fgrdNode.GetIJKToRASDirectionMatrix(fMat)
+    bgrdName = fgrdNode.GetName() + '_gray'
+    magnitude = vtk.vtkImageMagnitude()
+    magnitude.SetInputData(fgrdNode.GetImageData())
+    magnitude.Update()  
+    bgrdNode = slicer.vtkMRMLScalarVolumeNode()
+    bgrdNode.SetImageDataConnection(magnitude.GetOutputPort())
+    bgrdNode.SetName(bgrdName)
+    bgrdNode.SetIJKToRASDirectionMatrix(fMat)
+    slicer.mrmlScene.AddNode(bgrdNode)
+    bgrdVolID = bgrdNode.GetID()  
+    red_cn.SetForegroundVolumeID(fgrdVolID)
+    red_cn.SetBackgroundVolumeID(bgrdVolID)
+    red_cn.SetForegroundOpacity(1)   
+
+    resourcesPath = os.path.join(slicer.modules.slicerpathology.path.replace("SlicerPathology.py",""), 'Resources')
+    colorFile = os.path.join(resourcesPath, "Colors/SlicerPathology.csv")
+    try:
+        slicer.modules.EditorWidget.helper.structureListWidget.merge = None
+    except AttributeError:
+        pass
+
+    allColorTableNodes = slicer.util.getNodes('vtkMRMLColorTableNode*').values()
+    for ctn in allColorTableNodes:
+        if ctn.GetName() == 'SlicerPathologyColor':
+           slicer.mrmlScene.RemoveNode(ctn)
+           break
+
+    SlicerPathologyColorNode = slicer.vtkMRMLColorTableNode()
+    colorNode = SlicerPathologyColorNode
+    colorNode.SetName('SlicerPathologyColor')
+    slicer.mrmlScene.AddNode(colorNode)
+    colorNode.SetTypeToUser()
+    with open(colorFile) as f:
+        n = sum(1 for line in f)
+
+    colorNode.SetNumberOfColors(n-1)
+    colorNode.NamesInitialisedOn()
+    import csv
+    structureNames = []
+    with open(colorFile, 'rb') as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=',')
+        for index,row in enumerate(reader):
+            success = colorNode.SetColor(index ,row['Label'],float(row['R'])/255,float(row['G'])/255,float(row['B'])/255,float(row['A']))
+            if not success:
+                print "color %s could not be set" % row['Label']
+            structureNames.append(row['Label'])
+
+
+
+    volumesLogic = slicer.modules.volumes.logic()
+    labelName = bgrdName+'-label'
+    refLabel = volumesLogic.CreateAndAddLabelVolume(slicer.mrmlScene,bgrdNode,labelName)
+    refLabel.GetDisplayNode().SetAndObserveColorNodeID(SlicerPathologyColorNode.GetID())
+    self.editorWidget.helper.setMasterVolume(bgrdNode)
+
+  def openTargetImage0(self):
+    self.v = qt.QWebView()
+    weburl='http://quip1.bmi.stonybrook.edu:4000/'
+    self.v.setUrl(qt.QUrl(weburl))
+    self.v.show()
+
+  def openTargetImage(self):
+    import string
+    p = self.v.page() 
+    m = p.mainFrame()
+    imageBound=m.evaluateJavaScript('viewer.viewport.viewportToImageRectangle(viewer.viewport.getBounds().x, viewer.viewport.getBounds().y, viewer.viewport.getBounds().width, viewer.viewport.getBounds().height)')
+    x=imageBound[u'x']
+    y=imageBound[u'y']
+    width=imageBound[u'width']
+    height=imageBound[u'height']
+    self.j['x'] = x
+    self.j['y'] = y
+    self.j['width'] = width
+    self.j['height'] = height
+    imagedata = m.evaluateJavaScript('imagedata')
+    tmpfilename=  imagedata[u'metaData'][1]
+    imageFileName=string.rstrip(tmpfilename,'.dzi')
+    self.tilename = imagedata[u'imageId']
+    print self.tilename
+    self.parameterNode.SetParameter("SlicerPathology,tilename", self.tilename)
+    current_weburl ='http://quip1.uhmc.sunysb.edu/fcgi-bin/iipsrv.fcgi?IIIF=' + imageFileName +'/' + str(x) + ','+ str(y) + ',' + str(width) + ',' + str(height) + '/full/0/default.jpg'
+    print current_weburl
+    self.v.setUrl(qt.QUrl(current_weburl))
+    self.v.show()
+
+    reply = urllib2.urlopen(current_weburl)
+    byte_array = reply.read()
+    image = qt.QImage(qt.QImage.Format_RGB888)
+    image.loadFromData(byte_array)
+    imageData = self.QImage2vtkImage(image)
+    volumeNode = slicer.vtkMRMLVectorVolumeNode()
+    volumeNode.SetName("WEB")
+    volumeNode.SetAndObserveImageData(imageData)
+    displayNode = slicer.vtkMRMLVectorVolumeDisplayNode()
+    slicer.mrmlScene.AddNode(volumeNode)
+    slicer.mrmlScene.AddNode(displayNode)
+    volumeNode.SetAndObserveDisplayNodeID(displayNode.GetID())
+    displayNode.SetAndObserveColorNodeID('vtkMRMLColorTableNodeGrey')
+    self.mutate()
+
+
   def loadTCGAData(self):
     slicer.util.openAddVolumeDialog()
     red_logic = slicer.app.layoutManager().sliceWidget("Red").sliceLogic()
@@ -315,7 +477,7 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
     bgrdName = fgrdNode.GetName() + '_gray'
     self.tilename = fgrdNode.GetName() + '_gray'
     self.parameterNode.SetParameter("SlicerPathology,tilename", self.tilename)
-    # Get dummy grayscale image
+    # Create dummy grayscale image
     magnitude = vtk.vtkImageMagnitude()
     magnitude.SetInputData(fgrdNode.GetImageData())
     magnitude.Update()  
@@ -325,7 +487,6 @@ class SlicerPathologyWidget(ScriptedLoadableModuleWidget, ModuleWidgetMixin):
     bgrdNode.SetIJKToRASDirectionMatrix(fMat)
     slicer.mrmlScene.AddNode(bgrdNode)
     bgrdVolID = bgrdNode.GetID()  
-    # Reset slice configuration
     red_cn.SetForegroundVolumeID(fgrdVolID)
     red_cn.SetBackgroundVolumeID(bgrdVolID)
     red_cn.SetForegroundOpacity(1)   
@@ -467,3 +628,82 @@ class SlicerPathologyTest(ScriptedLoadableModuleTest):
     logic = SlicerPathologyLogic()
     self.assertTrue( logic.hasImageData(volumeNode) )
     self.delayDisplay('Test passed!')
+
+####
+# 02/2006 Will Holcomb <wholcomb@gmail.com>
+# 
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+# 
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+
+class Callable:
+    def __init__(self, anycallable):
+        self.__call__ = anycallable
+
+# Controls how sequences are uncoded. If true, elements may be given multiple values by
+#  assigning a sequence.
+doseq = 1
+
+class MultipartPostHandler(urllib2.BaseHandler):
+    handler_order = urllib2.HTTPHandler.handler_order - 10 # needs to run first
+
+    def http_request(self, request):
+        data = request.get_data()
+        if data is not None and type(data) != str:
+            v_files = []
+            v_vars = []
+            try:
+                 for(key, value) in data.items():
+                     if type(value) == file:
+                         v_files.append((key, value))
+                     else:
+                         v_vars.append((key, value))
+            except TypeError:
+                systype, value, traceback = sys.exc_info()
+                raise TypeError, "not a valid non-string sequence or mapping object", traceback
+
+            if len(v_files) == 0:
+                data = urllib.urlencode(v_vars, doseq)
+            else:
+                boundary, data = self.multipart_encode(v_vars, v_files)
+                contenttype = 'multipart/form-data; boundary=%s' % boundary
+                if(request.has_header('Content-Type')
+                   and request.get_header('Content-Type').find('multipart/form-data') != 0):
+                    print "Replacing %s with %s" % (request.get_header('content-type'), 'multipart/form-data')
+                request.add_unredirected_header('Content-Type', contenttype)
+
+            request.add_data(data)
+        return request
+
+    def multipart_encode(vars, files, boundary = None, buffer = None):
+        if boundary is None:
+            boundary = mimetools.choose_boundary()
+        if buffer is None:
+            buffer = ''
+        for(key, value) in vars:
+            buffer += '--%s\r\n' % boundary
+            buffer += 'Content-Disposition: form-data; name="%s"' % key
+            buffer += '\r\n\r\n' + value + '\r\n'
+        for(key, fd) in files:
+            file_size = os.fstat(fd.fileno())[stat.ST_SIZE]
+            filename = fd.name.split('/')[-1]
+            contenttype = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            buffer += '--%s\r\n' % boundary
+            buffer += 'Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (key, filename)
+            buffer += 'Content-Type: %s\r\n' % contenttype
+            # buffer += 'Content-Length: %s\r\n' % file_size
+            fd.seek(0)
+            buffer += '\r\n' + fd.read() + '\r\n'
+        buffer += '--%s--\r\n\r\n' % boundary
+        return boundary, buffer
+    multipart_encode = Callable(multipart_encode)
+
+    https_request = http_request
+
